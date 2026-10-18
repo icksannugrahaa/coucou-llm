@@ -380,8 +380,7 @@ final class NoteTaker: ObservableObject {
     /// when Claude writes the summaries). What was heard stays in each line's `raw`.
     func correct(_ id: UUID) async {
         guard summaryEngine == .claude, let note = self.note(id), !note.lines.isEmpty else { return }
-        let key = KeychainStore.shared.get("anthropic-api-key") ?? ""
-        guard !key.isEmpty else { return }
+        guard let connection = AnthropicConnection.current() else { return }
         working.insert(id)
         defer { working.remove(id) }
         let model = AppState.shared.claudeModel.isEmpty ? AppState.defaultClaudeModel : AppState.shared.claudeModel
@@ -392,7 +391,7 @@ final class NoteTaker: ObservableObject {
             var request = ""
             if !terms.isEmpty { request += "<vocabulary>\n" + terms.joined(separator: ", ") + "\n</vocabulary>\n" }
             request += "<transcript>\n" + NoteBuilder.numberedTranscript(note, range: range) + "\n</transcript>"
-            guard let reply = await Self.claude(system: Self.correctionInstructions, user: request, key: key,
+            guard let reply = await Self.claude(system: Self.correctionInstructions, user: request, connection: connection,
                                                 model: model, maxTokens: 8_000),
                   let correction = NoteBuilder.parseCorrection(reply) else { continue }
             total.lines.merge(correction.lines.filter { range.contains($0.key) }) { $1 }
@@ -406,16 +405,13 @@ final class NoteTaker: ObservableObject {
         appendAppLog("nb.log", "[Notetaker] correction: \(result.fixed) of \(note.lines.count) lines fixed")
     }
 
-    nonisolated private static func claude(system: String, user: String, key: String, model: String, maxTokens: Int) async -> String? {
+    nonisolated private static func claude(system: String, user: String, connection: AnthropicConnection,
+                                           model: String, maxTokens: Int) async -> String? {
         func call(_ model: String) async -> String? {
-            var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            guard var request = connection.request("/v1/messages", timeout: 180) else { return nil }
             request.httpMethod = "POST"
-            request.timeoutInterval = 180
-            request.setValue(key, forHTTPHeaderField: "x-api-key")
-            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
             let body: [String: Any] = [
-                "model": model,
+                "model": connection.model(model),
                 "max_tokens": maxTokens,
                 "system": system,
                 "messages": [["role": "user", "content": user]],
@@ -452,9 +448,12 @@ final class NoteTaker: ObservableObject {
         let reply: String?
         switch summaryEngine {
         case .claude:
-            let key = KeychainStore.shared.get("anthropic-api-key") ?? ""
             let model = AppState.shared.claudeModel.isEmpty ? AppState.defaultClaudeModel : AppState.shared.claudeModel
-            reply = key.isEmpty ? nil : await Self.claudeSummary(transcript, key: key, model: model)
+            if let connection = AnthropicConnection.current() {
+                reply = await Self.claudeSummary(transcript, connection: connection, model: model)
+            } else {
+                reply = nil
+            }
         case .apple:
             reply = await Self.appleSummary(transcript)
         case .off:
@@ -482,9 +481,10 @@ final class NoteTaker: ObservableObject {
     "key_points": ["up to 6 short points"], "todos": [{"text": "the task", "owner": "the person's name as written in the transcript, or null", "due": "the deadline as said, or null"}]}
     """
 
-    nonisolated private static func claudeSummary(_ transcript: String, key: String, model: String) async -> String? {
+    nonisolated private static func claudeSummary(_ transcript: String, connection: AnthropicConnection,
+                                                  model: String) async -> String? {
         await claude(system: summaryInstructions, user: "<transcript>\n\(transcript.prefix(400_000))\n</transcript>",
-                     key: key, model: model, maxTokens: 2048)
+                     connection: connection, model: model, maxTokens: 2048)
     }
 
     /// Apple's on-device model has a small context: a long call is first noted in parts, then the

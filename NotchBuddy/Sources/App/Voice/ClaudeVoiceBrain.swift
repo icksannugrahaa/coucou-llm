@@ -22,10 +22,9 @@ final class ClaudeVoiceBrain {
         let failed: Bool      // nothing usable came back
     }
 
-    /// Claude is Coucou's brain whenever an Anthropic key is saved (Settings → Chat).
-    static var isActive: Bool {
-        !(ClaudeService.shared.apiKey ?? "").isEmpty
-    }
+    /// Claude is Coucou's brain whenever Claude is set up in Settings → Chat (an Anthropic key,
+    /// or Claude Code's settings).
+    static var isActive: Bool { AnthropicConnection.isConfigured }
 
     private var messages: [[String: Any]] = []
     /// One turn at a time: a second "OK Coucou" during the wait must not interleave.

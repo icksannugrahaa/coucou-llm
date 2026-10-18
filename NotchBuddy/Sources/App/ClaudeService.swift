@@ -126,26 +126,22 @@ struct CompatibleModelsError: Error {
 final class ClaudeService {
     static let shared = ClaudeService()
 
-    private let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
-    private let anthropicVersion = "2023-06-01"
 
     // MARK: - Model list
 
-    /// Fetches available models from the Anthropic API in the order the API returns them
-    /// (newest first). Returns an empty array on any error — callers fall back to a static list.
-    static func fetchModels(apiKey: String) async -> [(id: String, label: String)] {
-        guard let url = URL(string: "https://api.anthropic.com/v1/models?limit=100") else { return [] }
-        var req = URLRequest(url: url, timeoutInterval: 10)
-        req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    /// Fetches available models from the Anthropic API (or the endpoint of Claude Code's
+    /// settings) in the order the API returns them (newest first). Returns an empty array on
+    /// any error — callers fall back to a static list.
+    static func fetchModels(connection: AnthropicConnection) async -> [(id: String, label: String)] {
+        guard let req = connection.request("/v1/models?limit=100", timeout: 10) else { return [] }
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let items = json["data"] as? [[String: Any]] else { return [] }
         return items.compactMap { item in
-            guard let id = item["id"] as? String,
-                  let name = item["display_name"] as? String else { return nil }
-            return (id: id, label: name)
+            // Proxies speaking the Anthropic API often leave out display_name.
+            guard let id = item["id"] as? String else { return nil }
+            return (id: id, label: item["display_name"] as? String ?? id)
         }
     }
 
@@ -262,8 +258,6 @@ final class ClaudeService {
         return m.isEmpty ? AppState.defaultClaudeModel : m
     }
 
-    var apiKey: String? { KeychainStore.shared.get("anthropic-api-key") }
-
     // Multi-turn conversation messages (for API)
     private var conversationMessages: [[String: Any]] = []
 
@@ -308,8 +302,8 @@ final class ClaudeService {
             await chatOpenAICompatible(query: query, context: context, state: state)
             return
         }
-        guard let key = apiKey, !key.isEmpty else {
-            await showError("API key missing. Open settings.", state: state)
+        guard let conn = AnthropicConnection.current() else {
+            await showError("Claude isn't set up: add an API key or use Claude Code's settings in Settings → Chat.", state: state)
             return
         }
 
@@ -343,7 +337,7 @@ final class ClaudeService {
         ]
 
         do {
-            let data = try await callAPI(body: body, key: key, beta: "web-search-2025-03-05")
+            let data = try await callAPI(body: body, connection: conn, beta: "web-search-2025-03-05")
             await handleChatResult(data, state: state)
         } catch {
             conversationMessages.removeLast()
@@ -552,8 +546,8 @@ final class ClaudeService {
     // MARK: - Structured search (M8 — window attach + web search)
 
     func search(query: String, context: PromptContext?, state: AppState) async {
-        guard let key = apiKey, !key.isEmpty else {
-            await showError("Anthropic API key missing. Open settings to configure it.", state: state)
+        guard let conn = AnthropicConnection.current() else {
+            await showError("Claude isn't set up: add an API key or use Claude Code's settings in Settings → Chat.", state: state)
             return
         }
 
@@ -593,7 +587,7 @@ final class ClaudeService {
         ]
 
         do {
-            let result = try await callAPI(body: body, key: key, beta: "web-search-2025-03-05")
+            let result = try await callAPI(body: body, connection: conn, beta: "web-search-2025-03-05")
             await handleResult(result, state: state)
         } catch {
             await showError(error.localizedDescription, state: state)
@@ -607,15 +601,15 @@ final class ClaudeService {
     /// the stop reason. The fast model first, the Settings model if the key can't use it.
     func voiceTurn(system: String, messages: [[String: Any]], tools: [[String: Any]])
         async -> (content: [[String: Any]], stopReason: String)? {
-        guard let key = apiKey, !key.isEmpty else { return nil }
+        guard let conn = AnthropicConnection.current() else { return nil }
         func body(_ model: String) -> [String: Any] {
             ["model": model, "max_tokens": 2048, "system": system, "tools": tools, "messages": messages]
         }
         let data: Data
         do {
-            data = try await callAPI(body: body(Self.voiceModel), key: key, beta: "web-search-2025-03-05")
+            data = try await callAPI(body: body(Self.voiceModel), connection: conn, beta: "web-search-2025-03-05")
         } catch {
-            guard let retry = try? await callAPI(body: body(model), key: key, beta: "web-search-2025-03-05") else {
+            guard let retry = try? await callAPI(body: body(model), connection: conn, beta: "web-search-2025-03-05") else {
                 appendAppLog("nb.log", "[Voice] Claude turn failed: \(error.localizedDescription)")
                 return nil
             }
@@ -635,7 +629,7 @@ final class ClaudeService {
     /// `history` holds the previous exchanges of this voice conversation (memory only).
     /// nil on any failure: no key, network, quota.
     func voiceAnswer(_ question: String, history: [VoiceWebTurn], french: Bool) async -> String? {
-        guard let key = apiKey, !key.isEmpty else { return nil }
+        guard let conn = AnthropicConnection.current() else { return nil }
         let today = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year()
             .locale(Locale(identifier: french ? "fr_FR" : "en_US")))
         let system = french
@@ -670,10 +664,10 @@ final class ClaudeService {
         }
         let data: Data
         do {
-            data = try await callAPI(body: body(Self.voiceModel), key: key, beta: "web-search-2025-03-05")
+            data = try await callAPI(body: body(Self.voiceModel), connection: conn, beta: "web-search-2025-03-05")
         } catch {
             // The fast model is not available to this key: the Settings model instead.
-            guard let retry = try? await callAPI(body: body(model), key: key, beta: "web-search-2025-03-05") else {
+            guard let retry = try? await callAPI(body: body(model), connection: conn, beta: "web-search-2025-03-05") else {
                 appendAppLog("nb.log", "[Voice] web answer failed")
                 return nil
             }
@@ -689,15 +683,14 @@ final class ClaudeService {
 
     // MARK: - API call
 
-    private func callAPI(body: [String: Any], key: String, beta: String? = nil) async throws -> Data {
-        var request = URLRequest(url: endpoint)
+    private func callAPI(body: [String: Any], connection: AnthropicConnection, beta: String? = nil) async throws -> Data {
+        guard var request = connection.request("/v1/messages", timeout: 45) else {
+            throw NSError(domain: "Claude", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid Claude endpoint."])
+        }
         request.httpMethod = "POST"
-        request.setValue(key, forHTTPHeaderField: "x-api-key")
-        request.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
         if let beta { request.setValue(beta, forHTTPHeaderField: "anthropic-beta") }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 45
+        // Claude Code's settings may map the model to the endpoint's own (e.g. a proxy's).
+        request.httpBody = try JSONSerialization.data(withJSONObject: connection.mapped(body))
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -708,7 +701,7 @@ final class ClaudeService {
                let errType = err["type"] as? String,
                let errMsg = err["message"] as? String {
                 if errType == "not_found_error" {
-                    let id = AppState.shared.claudeModel
+                    let id = (body["model"] as? String).map(connection.model) ?? AppState.shared.claudeModel
                     throw NSError(domain: "Claude", code: 0,
                         userInfo: [NSLocalizedDescriptionKey:
                             "Model not found: \(id). Pick another one in Settings."])

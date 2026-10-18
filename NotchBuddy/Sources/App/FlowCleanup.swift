@@ -11,21 +11,15 @@ enum FlowCleanup {
     /// Past this, the words are pasted as heard rather than keeping you waiting.
     static let timeout: TimeInterval = 4
 
-    static var hasKey: Bool {
-        !(KeychainStore.shared.get("anthropic-api-key") ?? "").isEmpty
-    }
+    static var hasKey: Bool { AnthropicConnection.isConfigured }
 
     static func clean(_ text: String, style: FlowStyle, app: String?, words: [String]) async -> String {
-        guard style != .verbatim, let key = KeychainStore.shared.get("anthropic-api-key"), !key.isEmpty,
-              FlowText.wordCount(text) >= 3 else { return text }
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        guard style != .verbatim, let connection = AnthropicConnection.current(),
+              FlowText.wordCount(text) >= 3,
+              var request = connection.request("/v1/messages", timeout: timeout) else { return text }
         request.httpMethod = "POST"
-        request.timeoutInterval = timeout
-        request.setValue(key, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
         let body: [String: Any] = [
-            "model": model,
+            "model": connection.model(model),
             "max_tokens": 2048,
             "temperature": 0,
             "system": system(style: style, app: app, words: words),
@@ -54,17 +48,13 @@ enum FlowCleanup {
     /// are pasted as heard.
     static func transform(_ text: String, prompt: Bool, language: FlowLanguage?, style: FlowStyle,
                           app: String?, words: [String]) async -> String {
-        guard prompt || language != nil, let key = KeychainStore.shared.get("anthropic-api-key"), !key.isEmpty,
-              FlowText.wordCount(text) >= 1 else { return text }
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        request.httpMethod = "POST"
         // A prompt takes a little longer to write than a clean-up.
-        request.timeoutInterval = prompt ? 12 : 8
-        request.setValue(key, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        guard prompt || language != nil, let connection = AnthropicConnection.current(),
+              FlowText.wordCount(text) >= 1,
+              var request = connection.request("/v1/messages", timeout: prompt ? 12 : 8) else { return text }
+        request.httpMethod = "POST"
         let body: [String: Any] = [
-            "model": model,
+            "model": connection.model(model),
             "max_tokens": 2048,
             "temperature": 0,
             "system": transformSystem(prompt: prompt, language: language, style: style, app: app, words: words),
