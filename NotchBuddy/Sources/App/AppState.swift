@@ -328,9 +328,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// A model picked for Claude: the custom endpoint's model when that is the connection,
+    /// else the API key's model.
+    func pickClaudeModel(_ model: String) {
+        if AnthropicSource.current == .customEndpoint {
+            AnthropicCustomEndpoint.model = model
+            objectWillChange.send()
+        } else {
+            claudeModel = model
+        }
+    }
+
     func chatModel(for provider: ChatProvider) -> String {
         switch provider {
-        case .anthropic: return claudeModel
+        // A custom endpoint with its own model sends that one, whatever claudeModel says.
+        case .anthropic: return AnthropicConnection.current()?.modelOverride ?? claudeModel
         case .google:    return googleChatModel
         case .openai:    return openAIChatModel
         case .ollama:    return ollamaChatModel
