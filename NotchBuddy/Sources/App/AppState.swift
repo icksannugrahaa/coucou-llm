@@ -236,6 +236,28 @@ final class AppState: ObservableObject {
             }
             return
         }
+        // Claude: an API key or Claude Code's settings
+        if provider == .anthropic {
+            guard let connection = AnthropicConnection.current() else {
+                providerModelFetchError[provider] = "Claude isn't set up — add a key or use Claude Code's settings."
+                return
+            }
+            loadingProviderModels.insert(provider)
+            providerModelFetchError.removeValue(forKey: provider)
+            Task {
+                let models = await ClaudeService.fetchModels(connection: connection)
+                loadingProviderModels.remove(provider)
+                if models.isEmpty {
+                    providerModelFetchError[provider] = "Failed to load models. Check your key or Claude Code's settings."
+                } else {
+                    fetchedProviderModels[provider] = models
+                    if !models.contains(where: { $0.id == claudeModel }) {
+                        claudeModel = models.first(where: { $0.id.contains("sonnet") })?.id ?? models.first!.id
+                    }
+                }
+            }
+            return
+        }
         // Remote providers: require API key
         guard let apiKey = KeychainStore.shared.get(provider.keychainKey), !apiKey.isEmpty else {
             providerModelFetchError[provider] = "No API key — add it in Settings."
@@ -246,7 +268,7 @@ final class AppState: ObservableObject {
         Task {
             let models: [(id: String, label: String)]
             switch provider {
-            case .anthropic: models = await ClaudeService.fetchModels(apiKey: apiKey)
+            case .anthropic: models = []  // handled above
             case .google:    models = await ClaudeService.fetchGoogleModels(apiKey: apiKey)
             case .openai:    models = await ClaudeService.fetchOpenAIModels(apiKey: apiKey)
             case .deepseek:  models = await ClaudeService.fetchOpenAICompatibleModels(baseURL: "https://api.deepseek.com/v1", apiKey: apiKey)

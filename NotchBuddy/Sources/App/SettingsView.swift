@@ -6,6 +6,14 @@ struct SettingsView: View {
     @ObservedObject private var state = AppState.shared
     @ObservedObject private var demoEngine = DemoEngine.shared
     @State private var apiKey: String = KeychainStore.shared.get("anthropic-api-key") ?? ""
+    #if !APPSTORE
+    @AppStorage(AnthropicSource.defaultsKey) private var anthropicSource: String = AnthropicSource.apiKey.rawValue
+    @State private var endpointURL: String   = AnthropicCustomEndpoint.baseURL
+    @State private var endpointToken: String = AnthropicCustomEndpoint.token ?? ""
+    @State private var endpointModel: String = AnthropicCustomEndpoint.model
+    @State private var endpointModels: [(id: String, label: String)] = []
+    @State private var savingEndpoint = false
+    #endif
 
     // Claude model — dynamic list fetched from the API, static fallback if unavailable
     private static let fallbackModels: [(id: String, label: String)] = [
@@ -241,23 +249,8 @@ struct SettingsView: View {
             #if !APPSTORE
             state.refreshPlanRelayState()
             #endif
-            guard fetchedModels.isEmpty,
-                  let key = KeychainStore.shared.get("anthropic-api-key"), !key.isEmpty else { return }
-            Task {
-                let models = await ClaudeService.fetchModels(apiKey: key)
-                guard !models.isEmpty else { return }
-                await MainActor.run {
-                    fetchedModels = models
-                    let m = state.claudeModel
-                    if models.contains(where: { $0.id == m }) {
-                        modelChoice = m
-                        customModel = ""
-                    } else if modelChoice != Self.customModelTag {
-                        modelChoice = Self.customModelTag
-                        customModel = m
-                    }
-                }
-            }
+            guard fetchedModels.isEmpty else { return }
+            loadAnthropicModels()
         }
     }
 
@@ -1029,44 +1022,154 @@ struct SettingsView: View {
         #endif
     }
 
+    /// Claude's model list, from the API key's account or Claude Code's endpoint.
+    private func loadAnthropicModels() {
+        guard let connection = AnthropicConnection.current() else { return }
+        Task {
+            let models = await ClaudeService.fetchModels(connection: connection)
+            guard !models.isEmpty else { return }
+            await MainActor.run {
+                if usesCustomEndpoint { endpointModels = models; return }
+                fetchedModels = models
+                let m = state.claudeModel
+                if models.contains(where: { $0.id == m }) {
+                    modelChoice = m
+                    customModel = ""
+                } else if modelChoice != Self.customModelTag {
+                    modelChoice = Self.customModelTag
+                    customModel = m
+                }
+            }
+        }
+    }
+
+    private var usesCustomEndpoint: Bool {
+        #if APPSTORE
+        return false
+        #else
+        return anthropicSource == AnthropicSource.customEndpoint.rawValue
+        #endif
+    }
+
+    /// A custom endpoint speaking the Anthropic API (the kind Claude Code reaches with
+    /// ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN). The token goes to the Keychain.
+    @ViewBuilder private var customEndpointFields: some View {
+        TextField("Base URL (https://gateway.example.com)", text: $endpointURL)
+            .textFieldStyle(.roundedBorder)
+        SecureField("Auth token", text: $endpointToken)
+            .textFieldStyle(.roundedBorder)
+        if endpointModels.isEmpty {
+            TextField("Model (e.g. claude-sonnet-4-6, or the gateway's own name)", text: $endpointModel)
+                .textFieldStyle(.roundedBorder)
+        } else {
+            Picker(String(localized: "chat.model"), selection: $endpointModel) {
+                ForEach(endpointModels, id: \.id) { m in Text(m.label).tag(m.id) }
+                if !endpointModels.contains(where: { $0.id == endpointModel }) {
+                    Text(verbatim: endpointModel.isEmpty ? "—" : endpointModel).tag(endpointModel)
+                }
+            }
+            .onChange(of: endpointModel) { _, value in AnthropicCustomEndpoint.model = value }
+        }
+        Button(savingEndpoint ? String(localized: "chat.connecting") : String(localized: "Save")) {
+            saveCustomEndpoint()
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(savingEndpoint || endpointURL.trimmingCharacters(in: .whitespaces).isEmpty || endpointToken.isEmpty)
+        Text("Every Claude call of Coucou (chat, voice, Flow, Notetaker) goes to this endpoint with this model. Leave the model empty to send Claude's own model names.")
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func saveCustomEndpoint() {
+        let base = AnthropicCustomEndpoint.normalised(endpointURL)
+        guard base.hasPrefix("http://") || base.hasPrefix("https://") else {
+            statusMessage = String(localized: "status.local.url-invalid")
+            return
+        }
+        AnthropicCustomEndpoint.baseURL = base
+        AnthropicCustomEndpoint.model = endpointModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainStore.shared.set(AnthropicCustomEndpoint.tokenKey, value: endpointToken)
+        endpointURL = base
+        state.fetchedProviderModels[.anthropic] = nil
+        guard let connection = AnthropicConnection.current() else { return }
+        savingEndpoint = true
+        Task {
+            // The model list is optional: many gateways don't serve /v1/models.
+            let models = await ClaudeService.fetchModels(connection: connection)
+            await MainActor.run {
+                savingEndpoint = false
+                endpointModels = models
+                if endpointModel.isEmpty, let first = models.first {
+                    endpointModel = first.id
+                    AnthropicCustomEndpoint.model = first.id
+                }
+                statusMessage = models.isEmpty
+                    ? "✓ Endpoint saved."
+                    : "✓ Endpoint saved · \(models.count) models."
+            }
+        }
+    }
+
     // MARK: - Chat section
 
     @ViewBuilder private var chatSection: some View {
         GroupBox(String(localized: "chat.anthropic-api.title")) {
             VStack(alignment: .leading, spacing: 8) {
-                SecureField(String(localized: "chat.api-key.claude"), text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
-                Button(String(localized: "Save")) {
-                    KeychainStore.shared.set("anthropic-api-key", value: apiKey)
-                    statusMessage = String(localized: "status.key-saved")
+                #if !APPSTORE
+                Picker("Connection", selection: $anthropicSource) {
+                    Text("API key").tag(AnthropicSource.apiKey.rawValue)
+                    Text("Custom endpoint").tag(AnthropicSource.customEndpoint.rawValue)
                 }
-                .buttonStyle(.borderedProminent)
-
-                Divider().padding(.vertical, 2)
-
-                Picker(String(localized: "chat.model"), selection: $modelChoice) {
-                    ForEach(displayModels, id: \.id) { preset in
-                        Text(preset.label).tag(preset.id)
-                    }
-                    Text(String(localized: "chat.model.custom")).tag(Self.customModelTag)
+                .pickerStyle(.segmented)
+                .onChange(of: anthropicSource) { _, _ in
+                    // Another endpoint: its own model list.
+                    fetchedModels = []
+                    state.fetchedProviderModels[.anthropic] = nil
+                    state.providerModelFetchError[.anthropic] = nil
+                    loadAnthropicModels()
                 }
-                .onChange(of: modelChoice) { _, choice in
-                    if choice != Self.customModelTag {
-                        state.claudeModel = choice
-                    } else {
-                        applyCustomModel(customModel)
-                    }
-                }
+                #endif
 
-                if modelChoice == Self.customModelTag {
-                    TextField(String(localized: "chat.model.custom-id"), text: $customModel)
+                if usesCustomEndpoint {
+                    customEndpointFields
+                } else {
+                    SecureField(String(localized: "chat.api-key.claude"), text: $apiKey)
                         .textFieldStyle(.roundedBorder)
-                        .onChange(of: customModel) { _, value in applyCustomModel(value) }
+                    Button(String(localized: "Save")) {
+                        KeychainStore.shared.set("anthropic-api-key", value: apiKey)
+                        statusMessage = String(localized: "status.key-saved")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
 
-                Text(String(localized: "chat.model.description"))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                if !usesCustomEndpoint {
+                    Divider().padding(.vertical, 2)
+
+                    Picker(String(localized: "chat.model"), selection: $modelChoice) {
+                        ForEach(displayModels, id: \.id) { preset in
+                            Text(preset.label).tag(preset.id)
+                        }
+                        Text(String(localized: "chat.model.custom")).tag(Self.customModelTag)
+                    }
+                    .onChange(of: modelChoice) { _, choice in
+                        if choice != Self.customModelTag {
+                            state.claudeModel = choice
+                        } else {
+                            applyCustomModel(customModel)
+                        }
+                    }
+
+                    if modelChoice == Self.customModelTag {
+                        TextField(String(localized: "chat.model.custom-id"), text: $customModel)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: customModel) { _, value in applyCustomModel(value) }
+                    }
+
+                    Text(String(localized: "chat.model.description"))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
             }
             .padding(6)
         }
@@ -1458,7 +1561,7 @@ struct SettingsView: View {
     @AppStorage("voiceElevenGender")   private var elevenGender: String = "female"
     @AppStorage("voicePitchFemale")    private var pitchFemale: Double = VoiceSettings.defaultPitchFemale
     @AppStorage("voicePitchMale")      private var pitchMale: Double = VoiceSettings.defaultPitchMale
-    @State private var webKeySaved: Bool = !(KeychainStore.shared.get("anthropic-api-key") ?? "").isEmpty
+    @State private var webKeySaved: Bool = AnthropicConnection.isConfigured
     @State private var elevenKeyDraft: String = ""
     @State private var elevenKeySaved: Bool = KeychainStore.shared.get(ElevenLabsTTS.keyName) != nil
 
@@ -1489,7 +1592,7 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .onAppear { webKeySaved = !(KeychainStore.shared.get("anthropic-api-key") ?? "").isEmpty }
+                .onAppear { webKeySaved = AnthropicConnection.isConfigured }
 
                 if voiceEngine.recognizerUnavailable {
                     HStack(spacing: 6) {
@@ -2296,9 +2399,12 @@ struct SettingsView: View {
                     let url = provider == .ollama ? state.ollamaServerURL : state.lmstudioServerURL
                     if url.isEmpty { return String(localized: "Not connected") }
                 } else {
-                    let keyId = def.id == "ai_anthropic" ? "anthropic-api-key"
-                               : def.id == "ai_google"    ? "google-api-key" : "openai-api-key"
-                    if KeychainStore.shared.get(keyId) == nil { return String(localized: "Key not configured") }
+                    if def.id == "ai_anthropic" {
+                        if !AnthropicConnection.isConfigured { return String(localized: "Key not configured") }
+                    } else {
+                        let keyId = def.id == "ai_google" ? "google-api-key" : "openai-api-key"
+                        if KeychainStore.shared.get(keyId) == nil { return String(localized: "Key not configured") }
+                    }
                 }
             }
             return nil
