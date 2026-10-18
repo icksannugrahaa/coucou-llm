@@ -126,7 +126,9 @@ enum VoiceSettings {
         let mic = await AVAudioApplication.requestRecordPermission()
         guard mic else { return false }
         return await withCheckedContinuation { cont in
-            SFSpeechRecognizer.requestAuthorization { status in
+            // @Sendable: TCC calls back on a background queue. Without it the closure inherits
+            // this function's main-actor isolation and Swift 6 traps on the queue check.
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in
                 cont.resume(returning: status == .authorized)
             }
         }
