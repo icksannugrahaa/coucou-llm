@@ -95,6 +95,10 @@ struct SettingsView: View {
     @State private var lmstudioURL:  String = AppState.shared.lmstudioServerURL
     @State private var connectingOllama:    Bool = false
     @State private var connectingLMStudio:  Bool = false
+    // Custom OpenAI-compatible endpoint
+    @State private var customURL: String = AppState.shared.customServerURL
+    @State private var customKey: String = KeychainStore.shared.get(ChatProvider.custom.keychainKey) ?? ""
+    @State private var connectingCustom: Bool = false
 
     // Integration keys
     @State private var resendKey: String    = KeychainStore.shared.get("resend-api-key")  ?? ""
@@ -1220,6 +1224,81 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
         }
+
+        GroupBox("OpenAI-compatible endpoint") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Circle().fill(Color(hex: ChatProvider.custom.accentHex)).frame(width: 8, height: 8)
+                    Text("Any OpenAI-compatible API").font(.system(size: 12, weight: .semibold))
+                    if !state.customServerURL.isEmpty {
+                        Text(String(localized: "Connected"))
+                            .font(.system(size: 10))
+                            .foregroundColor(Color(hex: "#22C55E"))
+                    }
+                }
+                Text("OpenRouter, Groq, Together, Mistral, vLLM, LiteLLM… Enter the base URL (usually ending in /v1). The key is optional and stored in the Keychain.")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if state.customServerURL.isEmpty {
+                    TextField("https://api.example.com/v1", text: $customURL)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("API key (optional)", text: $customKey)
+                        .textFieldStyle(.roundedBorder)
+                    Button(connectingCustom ? String(localized: "chat.connecting") : String(localized: "chat.connect")) {
+                        Task { await connectCustom() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(connectingCustom || customURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                } else {
+                    Text(state.customServerURL)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+
+                    if let models = state.fetchedProviderModels[.custom], !models.isEmpty {
+                        Picker("Model", selection: $state.customChatModel) {
+                            ForEach(models, id: \.id) { model in
+                                Text(model.label).tag(model.id)
+                            }
+                        }
+                    } else if state.loadingProviderModels.contains(.custom) {
+                        Text("Loading models…")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    } else if let error = state.providerModelFetchError[.custom] {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Use in chat") {
+                            state.chatProvider = .custom
+                            statusMessage = "✓ Chat now uses \(state.customChatModel)."
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(state.customChatModel.isEmpty)
+                        Button(String(localized: "chat.disconnect")) {
+                            state.customServerURL = ""
+                            state.customChatModel = ""
+                            customURL = ""
+                            customKey = ""
+                            KeychainStore.shared.remove(ChatProvider.custom.keychainKey)
+                            state.fetchedProviderModels[.custom] = nil
+                            state.providerModelFetchError[.custom] = nil
+                            if state.chatProvider == .custom { state.chatProvider = .anthropic }
+                            statusMessage = "Endpoint disconnected."
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .onAppear {
+                if !state.customServerURL.isEmpty { state.fetchModelsIfNeeded(for: .custom) }
+            }
+        }
     }
 
     // MARK: - Integrations section
@@ -1730,6 +1809,37 @@ struct SettingsView: View {
             statusMessage = String(localized: "status.local.connected \(models.count)")
         case .failure:
             statusMessage = String(format: String(localized: "status.local.unreachable %1$@ %2$@"), name, normalised)
+        }
+    }
+
+    /// Checks the endpoint by listing its models; saves the URL and key only when that works.
+    private func connectCustom() async {
+        let normalised = ClaudeService.normaliseCompatibleURL(customURL)
+        guard normalised.hasPrefix("http://") || normalised.hasPrefix("https://") else {
+            statusMessage = String(localized: "status.local.url-invalid")
+            return
+        }
+        let key = customKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        connectingCustom = true
+        statusMessage = ""
+        let result = await ClaudeService.fetchCompatibleModels(baseURL: normalised, apiKey: key)
+        connectingCustom = false
+        switch result {
+        case .success(let models) where models.isEmpty:
+            statusMessage = "This endpoint returned no models."
+        case .success(let models):
+            if key.isEmpty { KeychainStore.shared.remove(ChatProvider.custom.keychainKey) }
+            else           { KeychainStore.shared.set(ChatProvider.custom.keychainKey, value: key) }
+            state.fetchedProviderModels[.custom] = models
+            state.providerModelFetchError[.custom] = nil
+            if !models.contains(where: { $0.id == state.customChatModel }) {
+                state.customChatModel = models.first!.id
+            }
+            state.customServerURL = normalised
+            customURL = normalised
+            statusMessage = String(localized: "status.local.connected \(models.count)")
+        case .failure(let error):
+            statusMessage = "❌ \(error.message)"
         }
     }
 

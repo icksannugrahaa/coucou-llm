@@ -67,6 +67,7 @@ final class KeychainStore: @unchecked Sendable {
         "deepseek-api-key",
         "qwen-api-key",
         "moonshot-api-key",
+        "openai-compatible-key",
         "resend-api-key", "resend-from",
         "n8n-url", "n8n-api-key",
         "vercel-token",
@@ -110,6 +111,13 @@ final class KeychainStore: @unchecked Sendable {
         }
         if had { Keychain.delete(key: key) }
     }
+}
+
+// MARK: - OpenAI-compatible model list error
+
+/// A failed `GET /models` on a custom endpoint, carrying a message ready for the user.
+struct CompatibleModelsError: Error {
+    let message: String
 }
 
 // MARK: - Claude API
@@ -198,6 +206,54 @@ final class ClaudeService {
             guard let id = item["id"] as? String else { return nil }
             return (id: id, label: id)
         }
+    }
+
+    /// Cleans a user-typed OpenAI-compatible base URL: trims spaces and trailing slashes and drops
+    /// a pasted `/chat/completions` or `/models` suffix. Unlike `LocalChat.normaliseURL` it keeps
+    /// `/v1` (and paths like OpenRouter's `/api/v1`), which these endpoints need.
+    static func normaliseCompatibleURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix("/") { s = String(s.dropLast()) }
+        for suffix in ["/chat/completions", "/models"] where s.hasSuffix(suffix) {
+            s = String(s.dropLast(suffix.count))
+        }
+        while s.hasSuffix("/") { s = String(s.dropLast()) }
+        return s
+    }
+
+    /// Lists models from any OpenAI-compatible endpoint (`GET {baseURL}/models`), in the order the
+    /// server returns them. The key is optional: some self-hosted servers don't ask for one.
+    /// On failure, returns a short message that can be shown to the user as is.
+    static func fetchCompatibleModels(baseURL: String, apiKey: String?) async -> Result<[(id: String, label: String)], CompatibleModelsError> {
+        guard let url = URL(string: "\(baseURL)/models") else { return .failure(.init(message: "Invalid URL.")) }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        if let apiKey, !apiKey.isEmpty {
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: req)
+        } catch {
+            return .failure(.init(message: "Cannot reach \(baseURL)."))
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard status == 200 else {
+            if let err = (json?["error"] as? [String: Any])?["message"] as? String {
+                return .failure(.init(message: err))
+            }
+            if status == 401 || status == 403 { return .failure(.init(message: "API key rejected (HTTP \(status)).")) }
+            return .failure(.init(message: "HTTP \(status). Is the base URL right (usually ending in /v1)?"))
+        }
+        guard let items = json?["data"] as? [[String: Any]] else {
+            return .failure(.init(message: "Unexpected model list format."))
+        }
+        let models = items.compactMap { item -> (id: String, label: String)? in
+            guard let id = item["id"] as? String else { return nil }
+            return (id: id, label: id)
+        }
+        return .success(models)
     }
 
     /// Chosen in Settings; falls back to the default when the field is left empty.
@@ -295,7 +351,7 @@ final class ClaudeService {
         }
     }
 
-    // MARK: - OpenAI-compatible chat (Google Gemini / OpenAI / Ollama / LM Studio)
+    // MARK: - OpenAI-compatible chat (Google Gemini / OpenAI / Ollama / LM Studio / custom endpoint)
 
     func chatOpenAICompatible(query: String, context: PromptContext?, state: AppState) async {
         let provider = state.chatProvider
@@ -313,6 +369,7 @@ final class ClaudeService {
             case .deepseek:  baseURL = "https://api.deepseek.com/v1"
             case .qwen:      baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
             case .moonshot:  baseURL = "https://api.moonshot.cn/v1"
+            case .custom:    baseURL = Self.normaliseCompatibleURL(state.customServerURL)
             case .anthropic, .ollama, .lmstudio: baseURL = ""
             }
         }
@@ -321,15 +378,25 @@ final class ClaudeService {
             if provider.isLocal {
                 let name = provider == .ollama ? "Ollama" : "LM Studio"
                 await showError("Connect \(name) in Settings → Chat first.", state: state)
+            } else if provider == .custom {
+                await showError("Connect an OpenAI-compatible endpoint in Settings → Chat first.", state: state)
             }
+            return
+        }
+        if provider == .custom, state.activeChatModel.isEmpty {
+            await showError("Pick a model above the chat box first.", state: state)
             return
         }
         guard let url = URL(string: "\(baseURL)/chat/completions") else { return }
 
         // Auth header
-        let authHeader: String
+        let authHeader: String?
         if provider.isLocal {
             authHeader = "Bearer ollama"
+        } else if provider == .custom {
+            // The key is optional for custom endpoints (self-hosted servers often don't need one)
+            let key = KeychainStore.shared.get(provider.keychainKey) ?? ""
+            authHeader = key.isEmpty ? nil : "Bearer \(key)"
         } else {
             guard let key = KeychainStore.shared.get(provider.keychainKey), !key.isEmpty else {
                 await showError("\(provider.displayName) API key missing. Configure it in Settings.", state: state)
@@ -385,10 +452,11 @@ final class ClaudeService {
         ]
         if useStream { body["stream"] = true }
 
-        var req = URLRequest(url: url, timeoutInterval: useStream ? 120 : 30)
+        // Custom endpoints can be slow self-hosted servers: give them longer than the big clouds
+        var req = URLRequest(url: url, timeoutInterval: useStream || provider == .custom ? 120 : 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        if let authHeader { req.setValue(authHeader, forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         if useStream {
@@ -452,7 +520,7 @@ final class ClaudeService {
                 await showError(error.localizedDescription, state: state)
             }
         } else {
-            // Non-streaming (Google, OpenAI)
+            // Non-streaming (Google, OpenAI, custom OpenAI-compatible)
             do {
                 let (data, response) = try await URLSession.shared.data(for: req)
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else {

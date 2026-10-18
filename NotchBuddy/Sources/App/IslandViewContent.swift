@@ -1570,6 +1570,7 @@ struct ModelPickerView: View {
             let visibleProviders = ChatProvider.allCases.filter { p in
                 if p == .ollama   { return !AppState.shared.ollamaServerURL.isEmpty   || state.chatProvider == .ollama }
                 if p == .lmstudio { return !AppState.shared.lmstudioServerURL.isEmpty || state.chatProvider == .lmstudio }
+                if p == .custom   { return !AppState.shared.customServerURL.isEmpty   || state.chatProvider == .custom }
                 return true
             }
             ChipFlowLayout(spacing: 6) {
@@ -1660,6 +1661,7 @@ struct ModelPickerView: View {
                             case .deepseek:  state.deepseekChatModel = model.id
                             case .qwen:      state.qwenChatModel = model.id
                             case .moonshot:  state.moonshotChatModel = model.id
+                            case .custom:    state.customChatModel = model.id
                             }
                             isPresented = false
                             SoundEngine.shared.play("blip")

@@ -102,6 +102,7 @@ enum ChatProvider: String, CaseIterable, Codable {
     case deepseek  = "deepseek"
     case qwen      = "qwen"
     case moonshot  = "moonshot"
+    case custom    = "custom"
 
     var displayName: String {
         switch self {
@@ -113,6 +114,7 @@ enum ChatProvider: String, CaseIterable, Codable {
         case .deepseek:  "DeepSeek"
         case .qwen:      "Qwen"
         case .moonshot:  "Moonshot"
+        case .custom:    "Custom server"
         }
     }
 
@@ -126,6 +128,7 @@ enum ChatProvider: String, CaseIterable, Codable {
         case .deepseek:  "#5B8FF9"
         case .qwen:      "#FF6A00"
         case .moonshot:  "#7C5CFC"
+        case .custom:    "#C0C4CC"
         }
     }
 
@@ -139,6 +142,7 @@ enum ChatProvider: String, CaseIterable, Codable {
         case .deepseek:  "deepseek-chat"
         case .qwen:      "qwen-max"
         case .moonshot:  "moonshot-v1-32k"
+        case .custom:    ""
         }
     }
 
@@ -152,6 +156,8 @@ enum ChatProvider: String, CaseIterable, Codable {
         case .deepseek:  "deepseek-api-key"
         case .qwen:      "qwen-api-key"
         case .moonshot:  "moonshot-api-key"
+        // Same entry name as the Windows build's custom server key
+        case .custom:    "openai-compatible-key"
         }
     }
 
@@ -169,6 +175,7 @@ enum ChatProvider: String, CaseIterable, Codable {
         case .deepseek:  "ai_deepseek"
         case .qwen:      "ai_qwen"
         case .moonshot:  "ai_moonshot"
+        case .custom:    "ai_custom"
         }
     }
 
@@ -182,6 +189,7 @@ enum ChatProvider: String, CaseIterable, Codable {
         case "ai_deepseek":  self = .deepseek
         case "ai_qwen":      self = .qwen
         case "ai_moonshot":  self = .moonshot
+        case "ai_custom":    self = .custom
         default:             return nil
         }
     }
