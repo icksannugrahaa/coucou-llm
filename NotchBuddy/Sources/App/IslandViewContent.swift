@@ -1567,12 +1567,7 @@ struct ModelPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Provider chips — wrap; hide local providers when not connected and not already active
-            let visibleProviders = ChatProvider.allCases.filter { p in
-                if p == .ollama   { return !AppState.shared.ollamaServerURL.isEmpty   || state.chatProvider == .ollama }
-                if p == .lmstudio { return !AppState.shared.lmstudioServerURL.isEmpty || state.chatProvider == .lmstudio }
-                if p == .custom   { return !AppState.shared.customServerURL.isEmpty   || state.chatProvider == .custom }
-                return true
-            }
+            let visibleProviders = state.availableChatProviders
             ChipFlowLayout(spacing: 6) {
                 ForEach(visibleProviders, id: \.self) { provider in
                     Button {

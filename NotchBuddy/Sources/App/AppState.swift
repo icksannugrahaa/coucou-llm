@@ -313,8 +313,23 @@ final class AppState: ObservableObject {
     }
 
     /// The model currently active for chat (provider-aware).
-    var activeChatModel: String {
-        switch chatProvider {
+    var activeChatModel: String { chatModel(for: chatProvider) }
+
+    /// Providers that can be picked as the main AI (chat): every cloud provider, and a
+    /// server one (Ollama, LM Studio, custom endpoint) once it is connected.
+    var availableChatProviders: [ChatProvider] {
+        ChatProvider.allCases.filter { p in
+            switch p {
+            case .ollama:   return !ollamaServerURL.isEmpty   || chatProvider == .ollama
+            case .lmstudio: return !lmstudioServerURL.isEmpty || chatProvider == .lmstudio
+            case .custom:   return !customServerURL.isEmpty   || chatProvider == .custom
+            default:        return true
+            }
+        }
+    }
+
+    func chatModel(for provider: ChatProvider) -> String {
+        switch provider {
         case .anthropic: return claudeModel
         case .google:    return googleChatModel
         case .openai:    return openAIChatModel
