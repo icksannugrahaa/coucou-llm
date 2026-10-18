@@ -62,6 +62,7 @@ final class KeychainStore: @unchecked Sendable {
 
     private static let allKeys = [
         "anthropic-api-key",
+        "anthropic-custom-token",
         "google-api-key",
         "openai-api-key",
         "deepseek-api-key",

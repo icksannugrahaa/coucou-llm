@@ -8,6 +8,11 @@ struct SettingsView: View {
     @State private var apiKey: String = KeychainStore.shared.get("anthropic-api-key") ?? ""
     #if !APPSTORE
     @AppStorage(AnthropicSource.defaultsKey) private var anthropicSource: String = AnthropicSource.apiKey.rawValue
+    @State private var endpointURL: String   = AnthropicCustomEndpoint.baseURL
+    @State private var endpointToken: String = AnthropicCustomEndpoint.token ?? ""
+    @State private var endpointModel: String = AnthropicCustomEndpoint.model
+    @State private var endpointModels: [(id: String, label: String)] = []
+    @State private var savingEndpoint = false
     #endif
 
     // Claude model — dynamic list fetched from the API, static fallback if unavailable
@@ -1024,6 +1029,7 @@ struct SettingsView: View {
             let models = await ClaudeService.fetchModels(connection: connection)
             guard !models.isEmpty else { return }
             await MainActor.run {
+                if usesCustomEndpoint { endpointModels = models; return }
                 fetchedModels = models
                 let m = state.claudeModel
                 if models.contains(where: { $0.id == m }) {
@@ -1037,33 +1043,70 @@ struct SettingsView: View {
         }
     }
 
-    private var usesClaudeCodeSettings: Bool {
+    private var usesCustomEndpoint: Bool {
         #if APPSTORE
         return false
         #else
-        return anthropicSource == AnthropicSource.claudeCodeSettings.rawValue
+        return anthropicSource == AnthropicSource.customEndpoint.rawValue
         #endif
     }
 
-    /// What Coucou read in ~/.claude/settings.json: the endpoint, never the token.
-    @ViewBuilder private var claudeCodeSettingsInfo: some View {
-        if let info = ClaudeCodeSettings.summary() {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-                Text(verbatim: info.baseURL)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            Text("Same endpoint and token as Claude Code CLI (env in ~/.claude/settings.json). Coucou only reads that file.")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    /// A custom endpoint speaking the Anthropic API (the kind Claude Code reaches with
+    /// ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN). The token goes to the Keychain.
+    @ViewBuilder private var customEndpointFields: some View {
+        TextField("Base URL (https://gateway.example.com)", text: $endpointURL)
+            .textFieldStyle(.roundedBorder)
+        SecureField("Auth token", text: $endpointToken)
+            .textFieldStyle(.roundedBorder)
+        if endpointModels.isEmpty {
+            TextField("Model (e.g. claude-sonnet-4-6, or the gateway's own name)", text: $endpointModel)
+                .textFieldStyle(.roundedBorder)
         } else {
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "exclamationmark.circle").foregroundColor(.orange)
-                Text("No ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY in the env of ~/.claude/settings.json.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Picker(String(localized: "chat.model"), selection: $endpointModel) {
+                ForEach(endpointModels, id: \.id) { m in Text(m.label).tag(m.id) }
+                if !endpointModels.contains(where: { $0.id == endpointModel }) {
+                    Text(verbatim: endpointModel.isEmpty ? "—" : endpointModel).tag(endpointModel)
+                }
+            }
+            .onChange(of: endpointModel) { _, value in AnthropicCustomEndpoint.model = value }
+        }
+        Button(savingEndpoint ? String(localized: "chat.connecting") : String(localized: "Save")) {
+            saveCustomEndpoint()
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(savingEndpoint || endpointURL.trimmingCharacters(in: .whitespaces).isEmpty || endpointToken.isEmpty)
+        Text("Every Claude call of Coucou (chat, voice, Flow, Notetaker) goes to this endpoint with this model. Leave the model empty to send Claude's own model names.")
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func saveCustomEndpoint() {
+        let base = AnthropicCustomEndpoint.normalised(endpointURL)
+        guard base.hasPrefix("http://") || base.hasPrefix("https://") else {
+            statusMessage = String(localized: "status.local.url-invalid")
+            return
+        }
+        AnthropicCustomEndpoint.baseURL = base
+        AnthropicCustomEndpoint.model = endpointModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainStore.shared.set(AnthropicCustomEndpoint.tokenKey, value: endpointToken)
+        endpointURL = base
+        state.fetchedProviderModels[.anthropic] = nil
+        guard let connection = AnthropicConnection.current() else { return }
+        savingEndpoint = true
+        Task {
+            // The model list is optional: many gateways don't serve /v1/models.
+            let models = await ClaudeService.fetchModels(connection: connection)
+            await MainActor.run {
+                savingEndpoint = false
+                endpointModels = models
+                if endpointModel.isEmpty, let first = models.first {
+                    endpointModel = first.id
+                    AnthropicCustomEndpoint.model = first.id
+                }
+                statusMessage = models.isEmpty
+                    ? "✓ Endpoint saved."
+                    : "✓ Endpoint saved · \(models.count) models."
             }
         }
     }
@@ -1076,7 +1119,7 @@ struct SettingsView: View {
                 #if !APPSTORE
                 Picker("Connection", selection: $anthropicSource) {
                     Text("API key").tag(AnthropicSource.apiKey.rawValue)
-                    Text("Claude Code settings").tag(AnthropicSource.claudeCodeSettings.rawValue)
+                    Text("Custom endpoint").tag(AnthropicSource.customEndpoint.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: anthropicSource) { _, _ in
@@ -1088,8 +1131,8 @@ struct SettingsView: View {
                 }
                 #endif
 
-                if usesClaudeCodeSettings {
-                    claudeCodeSettingsInfo
+                if usesCustomEndpoint {
+                    customEndpointFields
                 } else {
                     SecureField(String(localized: "chat.api-key.claude"), text: $apiKey)
                         .textFieldStyle(.roundedBorder)
@@ -1100,20 +1143,9 @@ struct SettingsView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-                Divider().padding(.vertical, 2)
+                if !usesCustomEndpoint {
+                    Divider().padding(.vertical, 2)
 
-                if usesClaudeCodeSettings, let model = ClaudeCodeSettings.summary()?.model {
-                    // settings.json maps every Claude model to its own: that one is used.
-                    HStack(spacing: 6) {
-                        Text(String(localized: "chat.model"))
-                        Text(verbatim: model)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-                    Text("Set by ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL in ~/.claude/settings.json.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                } else {
                     Picker(String(localized: "chat.model"), selection: $modelChoice) {
                         ForEach(displayModels, id: \.id) { preset in
                             Text(preset.label).tag(preset.id)

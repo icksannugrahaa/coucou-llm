@@ -3,19 +3,18 @@ import Foundation
 // MARK: - Where Coucou's Claude calls go
 
 /// The connection behind every Claude call of Coucou (chat, voice, Flow clean-up, Notetaker):
-/// either the user's Anthropic API key (Keychain), or the endpoint Claude Code is set up with
-/// in `~/.claude/settings.json` (`env`: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` /
-/// `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_*_MODEL`). That file is only
-/// read, never written, and its token is never copied anywhere.
+/// either the user's Anthropic API key, or a custom endpoint speaking the Anthropic API
+/// (a proxy, a gateway — the same kind Claude Code reaches with ANTHROPIC_BASE_URL and
+/// ANTHROPIC_AUTH_TOKEN). Both are typed in Settings → Chat; tokens live in the Keychain.
 enum AnthropicSource: String, CaseIterable, Sendable {
     case apiKey
-    case claudeCodeSettings
+    case customEndpoint
 
     static let defaultsKey = "anthropicSource"
 
     static var current: AnthropicSource {
         #if APPSTORE
-        return .apiKey   // the sandbox can't read ~/.claude
+        return .apiKey   // the App Store build keeps the API key only
         #else
         guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
               let source = AnthropicSource(rawValue: raw) else { return .apiKey }
@@ -24,42 +23,73 @@ enum AnthropicSource: String, CaseIterable, Sendable {
     }
 }
 
+/// The custom endpoint as typed in Settings.
+enum AnthropicCustomEndpoint {
+    static let baseURLKey = "anthropicCustomBaseURL"     // UserDefaults
+    static let modelKey   = "anthropicCustomModel"       // UserDefaults
+    static let tokenKey   = "anthropic-custom-token"     // Keychain
+
+    static var baseURL: String {
+        get { UserDefaults.standard.string(forKey: baseURLKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: baseURLKey) }
+    }
+    static var model: String {
+        get { UserDefaults.standard.string(forKey: modelKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: modelKey) }
+    }
+    static var token: String? { KeychainStore.shared.get(tokenKey) }
+
+    /// Trims spaces and trailing slashes, and drops a pasted "/v1/messages" or "/v1".
+    static func normalised(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix("/") { s.removeLast() }
+        for suffix in ["/v1/messages", "/v1"] where s.hasSuffix(suffix) {
+            s = String(s.dropLast(suffix.count))
+        }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
+    static func connection(baseURL: String, token: String?, model: String) -> AnthropicConnection? {
+        let base = normalised(baseURL)
+        guard base.hasPrefix("http://") || base.hasPrefix("https://"),
+              let token, !token.isEmpty else { return nil }
+        let m = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AnthropicConnection(baseURL: base, apiKey: token, authToken: token,
+                                   modelOverride: m.isEmpty ? nil : m)
+    }
+}
+
 struct AnthropicConnection: Sendable {
     /// Server root, without a trailing slash ("https://api.anthropic.com").
     let baseURL: String
     let apiKey: String?          // sent as x-api-key
     let authToken: String?       // sent as Authorization: Bearer
-    /// Claude Code's model overrides (settings.json only).
-    let models: ModelOverrides
-
-    struct ModelOverrides: Sendable, Equatable {
-        var main: String?        // ANTHROPIC_MODEL
-        var opus: String?        // ANTHROPIC_DEFAULT_OPUS_MODEL
-        var sonnet: String?      // ANTHROPIC_DEFAULT_SONNET_MODEL
-        var haiku: String?       // ANTHROPIC_DEFAULT_HAIKU_MODEL, or ANTHROPIC_SMALL_FAST_MODEL
-
-        var isEmpty: Bool { [main, opus, sonnet, haiku].allSatisfy { $0 == nil } }
-    }
+    /// Custom endpoint: the one model every call uses (the endpoint's own name for it).
+    let modelOverride: String?
 
     static let anthropicBaseURL = "https://api.anthropic.com"
     static let version = "2023-06-01"
 
-    /// The connection to use now, or nil when Claude isn't set up (no key, or no usable
-    /// settings.json).
+    /// The connection to use now, or nil when Claude isn't set up.
     static func current() -> AnthropicConnection? {
         switch AnthropicSource.current {
         case .apiKey:
             guard let key = KeychainStore.shared.get("anthropic-api-key"), !key.isEmpty else { return nil }
             return AnthropicConnection(baseURL: anthropicBaseURL, apiKey: key, authToken: nil,
-                                       models: ModelOverrides())
-        case .claudeCodeSettings:
-            return ClaudeCodeSettings.connection()
+                                       modelOverride: nil)
+        case .customEndpoint:
+            return AnthropicCustomEndpoint.connection(baseURL: AnthropicCustomEndpoint.baseURL,
+                                                      token: AnthropicCustomEndpoint.token,
+                                                      model: AnthropicCustomEndpoint.model)
         }
     }
 
     static var isConfigured: Bool { current() != nil }
 
     /// A request to `path` ("/v1/messages") with the auth and version headers set.
+    /// A custom endpoint gets its token both ways (x-api-key and Bearer): gateways
+    /// read one or the other.
     func request(_ path: String, timeout: TimeInterval) -> URLRequest? {
         guard let url = URL(string: baseURL + path) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: timeout)
@@ -72,22 +102,8 @@ struct AnthropicConnection: Sendable {
         return request
     }
 
-    /// The model actually sent. With the API key: the requested one. With Claude Code's
-    /// settings: mapped the way Claude Code maps its aliases (a haiku request goes to the
-    /// haiku override, and so on), falling back to the main override.
-    func model(_ requested: String) -> String {
-        guard !models.isEmpty else { return requested }
-        let r = requested.lowercased()
-        let pick: String?
-        if r.contains("haiku") {
-            pick = models.haiku ?? models.main ?? models.sonnet ?? models.opus
-        } else if r.contains("opus") {
-            pick = models.opus ?? models.main ?? models.sonnet
-        } else {
-            pick = models.main ?? models.sonnet ?? models.opus
-        }
-        return pick ?? requested
-    }
+    /// The model actually sent: the custom endpoint's model when one is set, else the requested one.
+    func model(_ requested: String) -> String { modelOverride ?? requested }
 
     /// Same request body with its "model" mapped.
     func mapped(_ body: [String: Any]) -> [String: Any] {
@@ -95,50 +111,5 @@ struct AnthropicConnection: Sendable {
         var body = body
         body["model"] = model(m)
         return body
-    }
-}
-
-// MARK: - ~/.claude/settings.json
-
-/// Reads the `env` block Claude Code CLI uses for a custom endpoint. Read-only.
-enum ClaudeCodeSettings {
-    static var fileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-    }
-
-    static func env() -> [String: String] {
-        guard let data = try? Data(contentsOf: fileURL),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let env = root["env"] as? [String: Any] else { return [:] }
-        return env.compactMapValues { value in
-            let s = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return (s?.isEmpty ?? true) ? nil : s
-        }
-    }
-
-    /// nil when there is no token at all (nothing Coucou could authenticate with).
-    static func connection() -> AnthropicConnection? {
-        connection(from: env())
-    }
-
-    static func connection(from env: [String: String]) -> AnthropicConnection? {
-        let token = env["ANTHROPIC_AUTH_TOKEN"]
-        let key = env["ANTHROPIC_API_KEY"]
-        guard token != nil || key != nil else { return nil }
-        var base = env["ANTHROPIC_BASE_URL"] ?? AnthropicConnection.anthropicBaseURL
-        while base.hasSuffix("/") { base.removeLast() }
-        let models = AnthropicConnection.ModelOverrides(
-            main: env["ANTHROPIC_MODEL"],
-            opus: env["ANTHROPIC_DEFAULT_OPUS_MODEL"],
-            sonnet: env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-            haiku: env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] ?? env["ANTHROPIC_SMALL_FAST_MODEL"])
-        return AnthropicConnection(baseURL: base, apiKey: key, authToken: token, models: models)
-    }
-
-    /// What Settings shows: the endpoint and the model, never the token.
-    static func summary() -> (baseURL: String, model: String?)? {
-        guard let conn = connection() else { return nil }
-        return (conn.baseURL, conn.models.isEmpty ? nil : conn.model("claude-sonnet"))
     }
 }

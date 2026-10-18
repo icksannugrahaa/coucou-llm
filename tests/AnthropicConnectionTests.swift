@@ -9,48 +9,43 @@ final class KeychainStore: @unchecked Sendable {
 @main
 enum AnthropicConnectionTests {
     static func main() {
-        // No token at all: nothing to connect with
-        precondition(ClaudeCodeSettings.connection(from: [:]) == nil)
-        precondition(ClaudeCodeSettings.connection(from: ["ANTHROPIC_BASE_URL": "https://x.dev"]) == nil)
+        typealias Custom = AnthropicCustomEndpoint
 
-        // The user's proxy: base URL without trailing slash, bearer token, opus override only
-        let proxy = ClaudeCodeSettings.connection(from: [
-            "ANTHROPIC_AUTH_TOKEN": "t",
-            "ANTHROPIC_BASE_URL": "https://ai.example.works/",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "proxy-model",
-        ])!
-        precondition(proxy.baseURL == "https://ai.example.works")
-        precondition(proxy.authToken == "t" && proxy.apiKey == nil)
-        // Every Claude model goes to the only override
-        precondition(proxy.model("claude-sonnet-4-6") == "proxy-model")
-        precondition(proxy.model("claude-haiku-4-5") == "proxy-model")
-        precondition(proxy.model("claude-opus-4-1") == "proxy-model")
+        // Not usable: no token, no URL, not a web URL
+        precondition(Custom.connection(baseURL: "https://x.dev", token: nil, model: "") == nil)
+        precondition(Custom.connection(baseURL: "https://x.dev", token: "", model: "") == nil)
+        precondition(Custom.connection(baseURL: "", token: "t", model: "") == nil)
+        precondition(Custom.connection(baseURL: "x.dev", token: "t", model: "") == nil)
 
-        // Headers: bearer token, version, JSON; no x-api-key
+        // URL clean-up: slashes and a pasted /v1 or /v1/messages are dropped
+        precondition(Custom.normalised(" https://ai.example.works/ ") == "https://ai.example.works")
+        precondition(Custom.normalised("https://ai.example.works/v1") == "https://ai.example.works")
+        precondition(Custom.normalised("https://ai.example.works/v1/messages/") == "https://ai.example.works")
+        precondition(Custom.normalised("https://gw.example.com/anthropic") == "https://gw.example.com/anthropic")
+
+        // A gateway: token sent both ways, every model replaced by the endpoint's one
+        let proxy = Custom.connection(baseURL: "https://ai.example.works/v1", token: "t", model: " proxy-model ")!
         let req = proxy.request("/v1/messages", timeout: 10)!
         precondition(req.url?.absoluteString == "https://ai.example.works/v1/messages")
         precondition(req.value(forHTTPHeaderField: "Authorization") == "Bearer t")
-        precondition(req.value(forHTTPHeaderField: "x-api-key") == nil)
+        precondition(req.value(forHTTPHeaderField: "x-api-key") == "t")
         precondition(req.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
+        precondition(proxy.model("claude-sonnet-4-6") == "proxy-model")
+        precondition(proxy.model("claude-haiku-4-5") == "proxy-model")
+        precondition((proxy.mapped(["model": "claude-sonnet-4-6", "max_tokens": 1])["model"] as? String) == "proxy-model")
 
-        // Aliases mapped like Claude Code: haiku → haiku override, opus → opus, rest → main
-        let mapped = ClaudeCodeSettings.connection(from: [
-            "ANTHROPIC_API_KEY": "k",
-            "ANTHROPIC_MODEL": "main-m",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-m",
-            "ANTHROPIC_SMALL_FAST_MODEL": "fast-m",
-        ])!
-        precondition(mapped.baseURL == "https://api.anthropic.com")
-        precondition(mapped.request("/v1/models", timeout: 5)!.value(forHTTPHeaderField: "x-api-key") == "k")
-        precondition(mapped.model("claude-haiku-4-5") == "fast-m")
-        precondition(mapped.model("claude-opus-4-1") == "opus-m")
-        precondition(mapped.model("claude-sonnet-4-6") == "main-m")
-        precondition((mapped.mapped(["model": "claude-sonnet-4-6", "max_tokens": 1])["model"] as? String) == "main-m")
-
-        // No overrides: the requested model is sent as is
-        let plain = ClaudeCodeSettings.connection(from: ["ANTHROPIC_AUTH_TOKEN": "t"])!
+        // No model typed: the requested one is sent as is
+        let plain = Custom.connection(baseURL: "https://ai.example.works", token: "t", model: "")!
         precondition(plain.model("claude-sonnet-4-6") == "claude-sonnet-4-6")
 
-        print("Anthropic connection: 18 cases passed")
+        // The API key: x-api-key only, to Anthropic
+        let key = AnthropicConnection(baseURL: AnthropicConnection.anthropicBaseURL, apiKey: "k",
+                                      authToken: nil, modelOverride: nil)
+        let keyReq = key.request("/v1/models", timeout: 5)!
+        precondition(keyReq.url?.host == "api.anthropic.com")
+        precondition(keyReq.value(forHTTPHeaderField: "x-api-key") == "k")
+        precondition(keyReq.value(forHTTPHeaderField: "Authorization") == nil)
+
+        print("Anthropic connection: 20 cases passed")
     }
 }
