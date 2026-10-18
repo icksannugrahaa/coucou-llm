@@ -1114,6 +1114,30 @@ struct SettingsView: View {
     // MARK: - Chat section
 
     @ViewBuilder private var chatSection: some View {
+        // The one AI the notch chat (and every feature asking for "the main AI") uses.
+        // Same choice as the provider chips above the chat box.
+        GroupBox("Main AI") {
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("Provider", selection: Binding(
+                    get: { state.chatProvider },
+                    set: { provider in
+                        state.chatProvider = provider
+                        state.fetchModelsIfNeeded(for: provider)
+                    })) {
+                    ForEach(state.availableChatProviders, id: \.self) { provider in
+                        let model = state.chatModel(for: provider)
+                        Text(verbatim: model.isEmpty ? provider.displayName : "\(provider.displayName) · \(model)")
+                            .tag(provider)
+                    }
+                }
+                Text("Used by the notch chat. Set up each provider below; the model is chosen in its own box or above the chat box.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(6)
+        }
+
         GroupBox(String(localized: "chat.anthropic-api.title")) {
             VStack(alignment: .leading, spacing: 8) {
                 #if !APPSTORE
@@ -1376,12 +1400,6 @@ struct SettingsView: View {
                     }
 
                     HStack(spacing: 8) {
-                        Button("Use in chat") {
-                            state.chatProvider = .custom
-                            statusMessage = "✓ Chat now uses \(state.customChatModel)."
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(state.customChatModel.isEmpty)
                         Button(String(localized: "chat.disconnect")) {
                             state.customServerURL = ""
                             state.customChatModel = ""
