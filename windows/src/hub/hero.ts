@@ -4,10 +4,12 @@
 // its floor — they hop, look around, wave, and react when poked. Also the
 // glowing cards and the Mochis of empty pages. Port of FlowHubMochis.swift.
 //
-// One animation loop draws every live canvas; it stops when none is on screen
-// or the window is hidden, so a hidden window costs nothing.
+// One animation loop draws every live canvas; it stops when none is left or
+// the window is hidden, so a hidden window costs nothing, and skips the ones
+// scrolled out of sight.
 
 import { BotEngine, hexToRGB } from "../mochi/engine";
+import { onScreen, shouldAnimate } from "./frames";
 import type { BotEmoteName, BotStateName } from "../core/layout";
 import type { Outfit } from "../mochi/wardrobe";
 
@@ -23,6 +25,12 @@ const live = new Set<Animated>();
 let frame: number | null = null;
 let last = performance.now();
 const start = performance.now();
+/** The Coucou window is on screen, as Rust last said (`setWindowShown`). */
+let windowShown = true;
+
+function running(): boolean {
+  return shouldAnimate(live.size, document.visibilityState, windowShown);
+}
 
 function loop(now: number) {
   frame = null;
@@ -36,19 +44,30 @@ function loop(now: number) {
       continue;
     }
     a.shown = true;
-    a.draw(dt, t);
+    if (onScreen(a.el.getBoundingClientRect(), window.innerWidth, window.innerHeight)) a.draw(dt, t);
   }
-  if (live.size > 0 && document.visibilityState === "visible") frame = requestAnimationFrame(loop);
+  if (running()) frame = requestAnimationFrame(loop);
 }
 
 function wake() {
-  if (frame === null && live.size > 0 && document.visibilityState === "visible") {
+  if (frame === null && running()) {
     last = performance.now();
     frame = requestAnimationFrame(loop);
   }
 }
 
 document.addEventListener("visibilitychange", wake);
+
+/** The window was shown or hidden (the `hub-visible` event): hidden, the loop
+ *  stops at once; shown, it starts again. */
+export function setWindowShown(shown: boolean) {
+  windowShown = shown;
+  if (!shown && frame !== null) {
+    cancelAnimationFrame(frame);
+    frame = null;
+  }
+  wake();
+}
 
 function add(a: Animated) {
   live.add(a);
@@ -68,9 +87,17 @@ function fit(canvas: HTMLCanvasElement): { w: number; h: number; ctx: CanvasRend
   return { w, h, ctx };
 }
 
+/** "r,g,b" of each colour, read once: the particles ask every frame. */
+const channels = new Map<string, string>();
+
 function rgba(hex: string, alpha: number): string {
-  const [r, g, b] = hexToRGB(hex);
-  return `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${Math.max(0, Math.min(1, alpha))})`;
+  let rgb = channels.get(hex);
+  if (rgb === undefined) {
+    const [r, g, b] = hexToRGB(hex);
+    rgb = `${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)}`;
+    channels.set(hex, rgb);
+  }
+  return `rgba(${rgb},${Math.max(0, Math.min(1, alpha))})`;
 }
 
 // ── The backdrop ──────────────────────────────────────────────────────────────
@@ -374,6 +401,10 @@ export const THEMES: Record<string, Theme> = {
   phone: { color: "#3DDC84", cast: [m("#3DDC84", 56, 0.25), m("#F5F6F8", 46, 0.8, { outfit: "beanie" })] },
   voice: { color: "#F97316", cast: [m("#F97316", 60, 0.3), m("#F5F6F8", 48, 0.85, { outfit: "roundGlasses" })] },
   shortcuts: { color: "#6366F1", cast: [m("#6366F1", 56, 0.2, { outfit: "sunglasses" }), m("#F5F6F8", 46, 0.8)] },
+  mailOverview: { color: "#2F8CFF", cast: [m("#2F8CFF", 58, 0.2, { state: "working" }), m("#F5F6F8", 46, 0.7), m("#F5A524", 40, 1)] },
+  mailRules: { color: "#34D399", cast: [m("#34D399", 56, 0.3, { outfit: "roundGlasses" }), m("#8E939C", 46, 0.85)] },
+  mailBanned: { color: "#FF453A", cast: [m("#FF453A", 54, 0.25, { outfit: "sunglasses" }), m("#F5F6F8", 44, 0.8, { state: "sleeping", roams: false })] },
+  mailVIP: { color: "#F5A524", cast: [m("#F5A524", 60, 0.3, { outfit: "crown" }), m("#2F8CFF", 46, 0.85)] },
 };
 
 /** The band itself: title, line, actions, and the Mochis. */
